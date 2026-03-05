@@ -19,6 +19,8 @@ jobs:
 
       - name: Install deps
         run: |
+          pwd
+          ls -la
           pip install -r requirements.txt
 
       - name: Run agent
