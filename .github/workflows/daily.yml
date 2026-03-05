@@ -18,27 +18,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Debug workspace
-        run: |
-          echo "PWD:"
-          pwd
-          echo "List root:"
-          ls -la
-          echo "List .github/workflows:"
-          ls -la .github/workflows || true
-          echo "Find requirements.txt:"
-          find . -maxdepth 4 -type f -name "requirements.txt" -print
-
       - name: Install deps
         run: |
           set -e
+          python -m pip install --upgrade pip
           REQ_PATH="$(find . -maxdepth 4 -type f -name requirements.txt -print -quit)"
           if [ -z "$REQ_PATH" ]; then
             echo "ERROR: requirements.txt not found"
             exit 1
           fi
           echo "Using requirements file: $REQ_PATH"
-          python -m pip install --upgrade pip
           pip install -r "$REQ_PATH"
 
       - name: Run agent
