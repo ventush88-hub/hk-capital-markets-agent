@@ -2,12 +2,13 @@ name: HK Capital Markets Agent
 
 on:
   schedule:
-    - cron: "30 0 * * *"
+    - cron: "30 0 * * *"   # 08:30 HKT
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,13 +18,28 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Debug workspace
+        run: |
+          echo "PWD:"
+          pwd
+          echo "List root:"
+          ls -la
+          echo "List .github/workflows:"
+          ls -la .github/workflows || true
+          echo "Find requirements.txt:"
+          find . -maxdepth 4 -type f -name "requirements.txt" -print
+
       - name: Install deps
         run: |
-          pwd
-          ls -la
-          echo "Find requirements:"
-          find . -maxdepth 3 -type f -name "requirements.txt" -print
-          pip install -r "$(find . -maxdepth 3 -type f -name requirements.txt -print -quit)"
+          set -e
+          REQ_PATH="$(find . -maxdepth 4 -type f -name requirements.txt -print -quit)"
+          if [ -z "$REQ_PATH" ]; then
+            echo "ERROR: requirements.txt not found"
+            exit 1
+          fi
+          echo "Using requirements file: $REQ_PATH"
+          python -m pip install --upgrade pip
+          pip install -r "$REQ_PATH"
 
       - name: Run agent
         env:
