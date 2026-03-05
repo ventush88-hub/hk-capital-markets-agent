@@ -6,99 +6,122 @@ from email.message import EmailMessage
 import requests
 import yfinance as yf
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
 
 # -----------------------------
-# Config (from env / GitHub Secrets)
+# Secrets / Env
 # -----------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()  # optional
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()     # optional (enhance)
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "").strip()           # optional
 GMAIL_USER = os.getenv("GMAIL_USER", "").strip()
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").strip()
 EMAIL_TO = os.getenv("EMAIL_TO", "ventush88@gmail.com").strip()
 
-HK_TZ_LABEL = "HKT"
-
 
 def get_market_data():
-    # HK + China + USD relevant
+    """
+    HK + China + USD capital markets relevant snapshot.
+    """
     tickers = {
-        "S&P 500": "^GSPC",
-        "Nasdaq": "^IXIC",
         "Hang Seng": "^HSI",
         "HSCEI": "^HSCE",
         "CSI 300": "000300.SS",
-        "UST 10Y (yield proxy)": "^TNX",  # note: TNX is yield*10
+        "S&P 500": "^GSPC",
+        "Nasdaq": "^IXIC",
+
+        # Rates / risk
+        "UST 10Y (yield proxy)": "^TNX",  # TNX is yield * 10
+
+        # FX / commodities / crypto
+        "DXY": "DX-Y.NYB",
+        "USD/CNH": "CNH=X",
+        "USD/JPY": "JPY=X",
         "Brent": "BZ=F",
         "WTI": "CL=F",
         "Gold": "GC=F",
         "BTC": "BTC-USD",
-        "DXY": "DX-Y.NYB",
-        "USD/JPY": "JPY=X",
-        "USD/CNH": "CNH=X",
     }
 
     out = {}
     for name, tk in tickers.items():
         t = yf.Ticker(tk)
         hist = t.history(period="2d")
+
         if hist is None or hist.empty:
             continue
+
         last = float(hist["Close"].iloc[-1])
         prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else last
-        chg = (last - prev) / prev * 100 if prev != 0 else 0.0
 
-        # Format UST 10Y: ^TNX is yield*10
         if "UST 10Y" in name:
-            last = last / 10.0
-            prev = prev / 10.0
-            chg_bp = (last - prev) * 100  # 1.00% = 100bp
-            out[name] = {"level": round(last, 2), "change": round(chg_bp, 1), "unit": "%", "change_unit": "bp"}
+            # TNX: e.g. 43.21 -> 4.321%
+            last_y = last / 10.0
+            prev_y = prev / 10.0
+            bp = (last_y - prev_y) * 100  # 1.00% = 100bp
+            out[name] = {
+                "level": round(last_y, 2),
+                "change": round(bp, 1),
+                "unit": "%",
+                "change_unit": "bp",
+            }
         else:
-            out[name] = {"level": round(last, 2), "change": round(chg, 2), "unit": "", "change_unit": "%"}
+            chg = (last - prev) / prev * 100 if prev != 0 else 0.0
+            out[name] = {
+                "level": round(last, 2),
+                "change": round(chg, 2),
+                "unit": "",
+                "change_unit": "%",
+            }
 
     return out
 
 
 def get_headlines():
-    # If no NEWSAPI key, fallback to empty list (still works)
+    """
+    Optional: NewsAPI. If no key, return [].
+    """
     if not NEWSAPI_KEY:
         return []
 
-    url = "https://newsapi.org/v2/top-headlines"
-    params = {
-        "category": "business",
-        "language": "en",
-        "pageSize": 12,
-        "apiKey": NEWSAPI_KEY,
-    }
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    j = r.json()
-    articles = j.get("articles", []) or []
-    return [a.get("title", "").strip() for a in articles if a.get("title")]
+    try:
+        url = "https://newsapi.org/v2/top-headlines"
+        params = {
+            "category": "business",
+            "language": "en",
+            "pageSize": 12,
+            "apiKey": NEWSAPI_KEY,
+        }
+        r = requests.get(url, params=params, timeout=25)
+        r.raise_for_status()
+        j = r.json()
+        articles = j.get("articles", []) or []
+        return [a.get("title", "").strip() for a in articles if a.get("title")]
+    except Exception:
+        return []
 
 
 def ecm_window_score(mkt):
-    # simple desk-ish heuristic (0-10)
+    """
+    Simple desk heuristic (0-10), enough for a daily note.
+    """
     score = 5
     if mkt.get("Nasdaq", {}).get("change", 0) > 0:
         score += 1
     if mkt.get("S&P 500", {}).get("change", 0) > 0:
         score += 1
-    # rates down supports ECM risk appetite
-    if mkt.get("UST 10Y (yield proxy)", {}).get("change", 0) < 0:
-        score += 1
     if mkt.get("Hang Seng", {}).get("change", 0) > 0:
+        score += 1
+    # rates down supports risk appetite / ECM execution
+    if mkt.get("UST 10Y (yield proxy)", {}).get("change", 0) < 0:
         score += 1
     return max(0, min(score, 10))
 
 
 def dcm_window_state(mkt):
-    # Use UST10Y bp move as proxy for funding conditions
+    """
+    Use UST10Y bp move as rough funding proxy.
+    """
     bp = mkt.get("UST 10Y (yield proxy)", {}).get("change", 0)
     if bp <= -5:
         return "STRONG (rates down)"
@@ -109,103 +132,178 @@ def dcm_window_state(mkt):
     return "WEAK (rates up)"
 
 
-def llm_generate_note(mkt, headlines, ecm_score, dcm_state):
-    if not OPENAI_API_KEY:
-        raise RuntimeError("Missing OPENAI_API_KEY")
-
-    from openai import OpenAI
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    # Build compact market lines
-    def fmt_line(k):
+def template_note(mkt, headlines, ecm_score, dcm_state):
+    """
+    ALWAYS available. CM desk style, concise, 1-page friendly.
+    """
+    def g(k):
         v = mkt.get(k)
         if not v:
-            return None
+            return "N/A"
         if v["change_unit"] == "bp":
-            return f"{k}: {v['level']}{v['unit']} ({v['change']}bp)"
-        return f"{k}: {v['level']} ({v['change']}%)"
+            return f"{v['level']}{v['unit']} ({v['change']}bp)"
+        return f"{v['level']} ({v['change']}%)"
 
-    key_order = [
-        "Hang Seng", "HSCEI", "CSI 300",
-        "S&P 500", "Nasdaq",
-        "UST 10Y (yield proxy)",
-        "DXY", "USD/CNH", "USD/JPY",
-        "Brent", "WTI", "Gold", "BTC",
-    ]
-    market_lines = [x for x in (fmt_line(k) for k in key_order) if x]
+    # risk tone
+    risk = "Neutral"
+    nas = mkt.get("Nasdaq", {}).get("change", 0)
+    hsi = mkt.get("Hang Seng", {}).get("change", 0)
+    ybp = mkt.get("UST 10Y (yield proxy)", {}).get("change", 0)
+    if (nas > 0 and ybp < 0) or (hsi > 0 and ybp < 0):
+        risk = "Mild Risk-On"
+    if (nas < 0 and ybp > 0) and (hsi < 0):
+        risk = "Risk-Off"
 
-    headline_lines = headlines[:12]
+    # headlines
+    top_heads = headlines[:8] if headlines else []
+    heads_str = "\n".join([f"- {h}" for h in top_heads]) if top_heads else "- N/A"
 
-    prompt = f"""
+    # ECM read
+    if ecm_score >= 8:
+        ecm_read = "OPEN for size (placements / blocks)"
+        ipo_read = "IPO tone improving but still selective"
+    elif ecm_score >= 6:
+        ecm_read = "SELECTIVE (deal-by-deal execution)"
+        ipo_read = "IPO window selective"
+    else:
+        ecm_read = "TIGHT (only high-conviction / pre-sounded)"
+        ipo_read = "IPO window challenged"
+
+    # DCM read
+    if "STRONG" in dcm_state or "OPEN" in dcm_state:
+        ig_read = "Constructive for Asia USD IG; SOE/financials better bid"
+        hy_read = "HY still selective / headline-driven"
+    else:
+        ig_read = "Choppy; funding costs not friendly"
+        hy_read = "HY window likely shut"
+
+    note = f"""HK Capital Markets Morning Note (ECM + DCM) — {datetime.utcnow().strftime('%Y-%m-%d')}
+
+Overnight Risk Tone: {risk}
+
+Market Snapshot (HK + China + USD):
+- Hang Seng: {g("Hang Seng")} | HSCEI: {g("HSCEI")} | CSI 300: {g("CSI 300")}
+- S&P 500: {g("S&P 500")} | Nasdaq: {g("Nasdaq")} | UST 10Y: {g("UST 10Y (yield proxy)")}
+- DXY: {g("DXY")} | USD/CNH: {g("USD/CNH")} | USD/JPY: {g("USD/JPY")}
+- Brent: {g("Brent")} | Gold: {g("Gold")} | BTC: {g("BTC")}
+
+What Matters for Capital Markets Today:
+- Rates / USD tone → DCM funding conditions: {dcm_state} (watch UST moves + DXY + CNH)
+- Equity tape → ECM execution: {ecm_read} (liquidity + risk appetite drive placement success)
+- China/HK narrative → policy/property/SOE funding headlines can reprice issuance windows quickly
+
+ECM Window Monitor: {ecm_score}/10
+- Placements / blocks: {ecm_read}
+- IPO: {ipo_read}
+- Bias: liquid large caps, catalyst-backed trades; keep sizing disciplined if tape fragile
+
+DCM Window Monitor: {dcm_state}
+- Asia USD IG: {ig_read}
+- HY: {hy_read}
+- Watch: China SOE vs private credit differentiation; CNH volatility as sentiment barometer
+
+Deals / Radar (HK + China + USD):
+- ECM: HK large-cap tech/consumer names if tape stable; blocks more feasible than IPOs in mixed tape
+- DCM: China SOE / financials more likely to test window when UST stabilizes / bids deepen
+- Watchlist: property policy headlines; any sharp USD/CNH move can shut risk quickly
+
+Overnight Headlines:
+{heads_str}
+
+Desk Takeaways:
+1) ECM: {ecm_read}
+2) DCM: {ig_read}
+3) Stay nimble around CNH + UST volatility; pre-sound and keep execution optionality
+"""
+    return note
+
+
+def llm_enhance_note(base_note, mkt, headlines, ecm_score, dcm_state):
+    """
+    Optional enhancement. If quota error / no key -> return base_note.
+    """
+    if not OPENAI_API_KEY:
+        return base_note
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        prompt = f"""
 You are an investment bank Capital Markets desk (ECM + DCM) strategist.
 
-Write a ONE-PAGE "HK Capital Markets Morning Note" (English, concise, punchy).
-Focus on Hong Kong market, with China and USD funding conditions.
+Rewrite and tighten the following note into a ONE-PAGE PDF-friendly format (English).
+Keep the same structure but make it sharper, more desk-like, less generic.
 
-Must include:
-1) Overnight risk tone (1-2 sentences)
-2) "What matters for Capital Markets today" (3 bullets, each: move → implication for ECM/DCM)
-3) ECM Window Monitor (score {ecm_score}/10 with 2-3 bullets: placements/block/IPO)
-4) DCM Window Monitor (state: {dcm_state} with 2-3 bullets: Asia USD IG/HY/SOE tone)
-5) Deals/Radar (3 bullets: sectors/issuers likely to tap ECM or USD DCM)
-6) Desk Takeaways (3 numbered lines)
+Constraints:
+- 350–450 words
+- HK focus + China + USD funding
+- Keep ECM/DCM 50/50 tone
+- Use short bullets where helpful
+- Avoid long macro explanations
 
-Keep it within ~350-450 words.
-Avoid generic macro textbook explanations. Sound like a real desk note.
+Inputs:
+ECM score: {ecm_score}/10
+DCM state: {dcm_state}
+Headlines: {headlines[:10] if headlines else "N/A"}
 
-Market snapshot:
-- {"; ".join(market_lines)}
-
-Overnight headlines:
-- {" | ".join(headline_lines) if headline_lines else "N/A"}
+Original note:
+{base_note}
 """.strip()
 
-    resp = client.responses.create(
-        model="gpt-4.1-mini",
-        input=prompt,
-    )
-    return resp.output_text
+        resp = client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt,
+        )
+        return resp.output_text
+
+    except Exception:
+        # quota / 429 / any error -> fallback
+        return base_note
 
 
 def build_pdf(note_text, filename="morning_note.pdf"):
-    # Simple clean one-page PDF
+    """
+    Simple clean PDF using ReportLab (very stable in GitHub Actions).
+    """
     c = canvas.Canvas(filename, pagesize=A4)
     width, height = A4
 
-    # Title
-    dt = datetime.utcnow().strftime("%Y-%m-%d")
-    title = f"HK Capital Markets Morning Note — {dt} ({HK_TZ_LABEL})"
+    title = "HK Capital Markets Morning Note"
     c.setFont("Helvetica-Bold", 14)
     c.drawString(40, height - 50, title)
 
     c.setFont("Helvetica", 10)
     y = height - 80
-
-    # Wrap text manually
     max_width = width - 80
+
+    def draw_wrapped(line, y_pos):
+        # naive wrap by words
+        words = line.split(" ")
+        cur = ""
+        for w in words:
+            test = (cur + " " + w).strip()
+            if c.stringWidth(test, "Helvetica", 10) <= max_width:
+                cur = test
+            else:
+                c.drawString(40, y_pos, cur)
+                y_pos -= 14
+                cur = w
+        if cur:
+            c.drawString(40, y_pos, cur)
+            y_pos -= 14
+        return y_pos
+
     for para in note_text.split("\n"):
         if not para.strip():
             y -= 10
             continue
 
-        words = para.split(" ")
-        line = ""
-        for w in words:
-            test = (line + " " + w).strip()
-            if c.stringWidth(test, "Helvetica", 10) <= max_width:
-                line = test
-            else:
-                c.drawString(40, y, line)
-                y -= 14
-                line = w
-                if y < 60:
-                    # if overflow, start a new page (rare, but safe)
-                    c.showPage()
-                    c.setFont("Helvetica", 10)
-                    y = height - 60
-        if line:
-            c.drawString(40, y, line)
-            y -= 14
+        y = draw_wrapped(para, y)
+        if y < 60:
+            c.showPage()
+            c.setFont("Helvetica", 10)
+            y = height - 60
 
     c.showPage()
     c.save()
@@ -237,11 +335,14 @@ def send_email_with_attachment(pdf_path):
 def main():
     mkt = get_market_data()
     headlines = get_headlines()
+
     ecm_score = ecm_window_score(mkt)
     dcm_state = dcm_window_state(mkt)
 
-    note = llm_generate_note(mkt, headlines, ecm_score, dcm_state)
-    build_pdf(note, "morning_note.pdf")
+    base = template_note(mkt, headlines, ecm_score, dcm_state)
+    final_note = llm_enhance_note(base, mkt, headlines, ecm_score, dcm_state)
+
+    build_pdf(final_note, "morning_note.pdf")
     send_email_with_attachment("morning_note.pdf")
 
 
