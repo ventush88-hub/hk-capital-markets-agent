@@ -21,7 +21,9 @@ jobs:
         run: |
           pwd
           ls -la
-          pip install -r requirements.txt
+          echo "Find requirements:"
+          find . -maxdepth 3 -type f -name "requirements.txt" -print
+          pip install -r "$(find . -maxdepth 3 -type f -name requirements.txt -print -quit)"
 
       - name: Run agent
         env:
