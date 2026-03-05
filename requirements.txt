@@ -1,6 +1,0 @@
-yfinance
-pandas
-requests
-openai
-reportlab
-python-dateutil
